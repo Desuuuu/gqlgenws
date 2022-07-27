@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/Desuuuu/gqlgenws/internal/util"
 	"github.com/Desuuuu/gqlgenws/wserr"
 	"github.com/Desuuuu/gqlgenws/wsutil"
 	"github.com/vektah/gqlparser/v2/gqlerror"
@@ -241,23 +242,28 @@ func (c *connection) executeOperation(ctx context.Context, rc *graphql.Operation
 	responses, ctx := c.exec.DispatchOperation(ctx, rc)
 
 	err := wserr.GetOperationError(ctx)
-	if err != nil {
-		c.close(err)
-		return
-	}
+	if err == nil {
+		for {
+			response := responses(ctx)
+			if response == nil {
+				break
+			}
 
-	for {
-		response := responses(ctx)
-		if response == nil {
-			break
+			c.operationResponse(id, response)
 		}
 
-		c.operationResponse(id, response)
+		err = wserr.GetOperationError(ctx)
 	}
 
-	err = wserr.GetOperationError(ctx)
 	if err != nil {
-		c.close(err)
+		var ce wserr.CloseError
+		if errors.As(err, &ce) {
+			c.close(ce)
+			return
+		}
+
+		resp := c.exec.DispatchError(graphql.WithOperationContext(ctx, rc), util.GetErrorList(err))
+		c.operationError(id, resp.Errors)
 		return
 	}
 

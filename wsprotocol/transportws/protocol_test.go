@@ -272,7 +272,51 @@ func TestProtocol(t *testing.T) {
 		require.JSONEq(t, `{"type":"connection_error","payload":{"message":"Subscriber for foo already exists"}}`, string(res))
 	})
 
-	t.Run("start error", func(t *testing.T) {
+	t.Run("operation error", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
+		defer cancel()
+
+		h := handler.New(&graphql.ExecutableSchemaMock{
+			ExecFunc: func(ctx context.Context) graphql.ResponseHandler {
+				return func(ctx context.Context) *graphql.Response {
+					wserr.SetOperationError(ctx, errors.New("Custom operation error"))
+					return nil
+				}
+			},
+			SchemaFunc: func() *ast.Schema {
+				return gqlparser.MustLoadSchema(&ast.Source{Input: `
+				type Subscription {
+					name: String!
+				}
+			`})
+			},
+		})
+
+		h.AddTransport(&Protocol{})
+
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+
+		c, err := wsConnect(ctx, srv.URL, "")
+		require.NoError(t, err)
+		defer c.Close(websocket.StatusNormalClosure, "")
+
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"connection_init"}`))
+		require.NoError(t, err)
+
+		_, res, err := c.Read(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
+
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"subscription { name }"}}`))
+		require.NoError(t, err)
+
+		_, res, err = c.Read(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"type":"error","id":"foo","payload":{"message":"Custom operation error"}}`, string(res))
+	})
+
+	t.Run("operation close error", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 		defer cancel()
 
