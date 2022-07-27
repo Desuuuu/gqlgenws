@@ -1,4 +1,4 @@
-package graphqlws
+package wsutil
 
 import "testing"
 

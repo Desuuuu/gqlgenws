@@ -78,6 +78,7 @@ func TestNegotiator(t *testing.T) {
 
 		var ce websocket.CloseError
 		require.ErrorAs(t, err, &ce)
+		require.Equal(t, websocket.StatusProtocolError, ce.Code)
 		require.Equal(t, "subprotocol negotiation failed", ce.Reason)
 
 		require.Equal(t, protocol.Clients(), 0)

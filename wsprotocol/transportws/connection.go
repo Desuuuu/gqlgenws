@@ -1,4 +1,4 @@
-package graphqlws
+package transportws
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/Desuuuu/gqlgenws/wserr"
-	"github.com/Desuuuu/gqlgenws/wsprotocol/graphqlws/code"
 	"github.com/Desuuuu/gqlgenws/wsutil"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"nhooyr.io/websocket"
@@ -43,13 +42,7 @@ func (c *connection) run() error {
 
 	go c.initTimeout(initCtx)
 
-	var pingTicker *time.Ticker
-
-	if c.protocol.PingInterval.Nanoseconds() > 0 {
-		pingTicker = time.NewTicker(c.protocol.PingInterval)
-
-		go c.ping(pingTicker)
-	}
+	var keepAliveTicker *time.Ticker
 
 	for {
 		msg, err := c.readMessage()
@@ -57,48 +50,69 @@ func (c *connection) run() error {
 			return err
 		}
 
-		if pingTicker != nil {
-			pingTicker.Reset(c.protocol.PingInterval)
+		if keepAliveTicker != nil {
+			keepAliveTicker.Reset(c.protocol.KeepAliveInterval)
+		}
+
+		if msg == nil {
+			continue
 		}
 
 		switch msg.Type {
 		case connectionInitType:
-			err = c.init(msg.Payload)
+			ok, err := c.init(msg.Payload)
 			if err != nil {
 				return err
 			}
 
+			if !ok {
+				continue
+			}
+
 			initCancel()
 			c.acknowledged = true
-		case pingType:
-			err = c.pong(msg.Payload)
+
+			if c.protocol.KeepAliveInterval.Nanoseconds() > 0 {
+				err = c.writeMessage(&message{
+					Type: keepAliveType,
+				}, nil)
+				if err != nil {
+					return err
+				}
+
+				keepAliveTicker = time.NewTicker(c.protocol.KeepAliveInterval)
+
+				go c.keepAlive(keepAliveTicker)
+			}
+		case startType:
+			err = c.start(msg.Id, msg.Payload)
 			if err != nil {
 				return err
 			}
-		case pongType:
-		case subscribeType:
-			err = c.subscribe(msg.Id, msg.Payload)
-			if err != nil {
-				return err
-			}
-		case completeType:
-			c.complete(msg.Id)
+		case stopType:
+			c.stop(msg.Id)
+		case connectionTerminateType:
+			return nil
 		default:
-			return wserr.CloseError{
-				Code:   code.BadRequest,
-				Reason: "Invalid message",
+			err = c.writeMessage(&message{
+				Type: errorType,
+			}, wsutil.ObjectPayload{
+				"message": "Invalid message type",
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
 }
 
-func (c *connection) init(payload json.RawMessage) error {
+func (c *connection) init(payload json.RawMessage) (bool, error) {
 	c.initReceivedMutex.Lock()
 	if c.initReceived {
 		c.initReceivedMutex.Unlock()
 
-		return wserr.CloseError{
-			Code:   code.TooManyInitialisationRequests,
+		return false, wserr.CloseError{
+			Code:   int(websocket.StatusPolicyViolation),
 			Reason: "Too many initialisation requests",
 		}
 	}
@@ -113,23 +127,23 @@ func (c *connection) init(payload json.RawMessage) error {
 
 		err := decodePayload(payload, &initPayload)
 		if err != nil {
-			return wserr.CloseError{
-				Err:    err,
-				Code:   code.BadRequest,
-				Reason: "Invalid payload",
-			}
+			return false, c.writeMessage(&message{
+				Type: connectionErrorType,
+			}, wsutil.ObjectPayload{
+				"message": "Invalid payload",
+			})
 		}
 
 		ctx, payload, err := initFunc(c.req, initPayload)
 		if err != nil {
 			var ce wserr.CloseError
 			if errors.As(err, &ce) {
-				return ce
+				return false, ce
 			}
 
-			return wserr.CloseError{
+			return false, wserr.CloseError{
 				Err:    err,
-				Code:   code.Forbidden,
+				Code:   int(websocket.StatusPolicyViolation),
 				Reason: "Forbidden",
 			}
 		}
@@ -143,30 +157,26 @@ func (c *connection) init(payload json.RawMessage) error {
 		ackPayload = payload
 	}
 
-	return c.writeMessage(&message{
+	return true, c.writeMessage(&message{
 		Type: connectionAckType,
 	}, ackPayload)
 }
 
-func (c *connection) pong(payload json.RawMessage) error {
-	return c.writeMessage(&message{
-		Type: pongType,
-	}, payload)
-}
-
-func (c *connection) subscribe(id string, payload json.RawMessage) error {
+func (c *connection) start(id string, payload json.RawMessage) error {
 	if !c.acknowledged {
-		return wserr.CloseError{
-			Code:   code.Unauthorized,
-			Reason: "Unauthorized",
-		}
+		return c.writeMessage(&message{
+			Type: connectionErrorType,
+		}, wsutil.ObjectPayload{
+			"message": "Unauthorized",
+		})
 	}
 
 	if id == "" {
-		return wserr.CloseError{
-			Code:   code.BadRequest,
-			Reason: "Invalid message",
-		}
+		return c.writeMessage(&message{
+			Type: connectionErrorType,
+		}, wsutil.ObjectPayload{
+			"message": "Invalid message",
+		})
 	}
 
 	var params *graphql.RawParams
@@ -175,11 +185,11 @@ func (c *connection) subscribe(id string, payload json.RawMessage) error {
 	start := graphql.Now()
 
 	if err := decodePayload(payload, &params, useNumber); err != nil || params == nil {
-		return wserr.CloseError{
-			Err:    err,
-			Code:   code.BadRequest,
-			Reason: "Invalid payload",
-		}
+		return c.writeMessage(&message{
+			Type: connectionErrorType,
+		}, wsutil.ObjectPayload{
+			"message": "Invalid payload",
+		})
 	}
 
 	params.ReadTime = graphql.TraceTiming{
@@ -191,10 +201,11 @@ func (c *connection) subscribe(id string, payload json.RawMessage) error {
 	if _, ok := c.operations[id]; ok {
 		c.operationsMutex.Unlock()
 
-		return wserr.CloseError{
-			Code:   code.SubscriberAlreadyExists,
-			Reason: fmt.Sprintf("Subscriber for %s already exists", id),
-		}
+		return c.writeMessage(&message{
+			Type: connectionErrorType,
+		}, wsutil.ObjectPayload{
+			"message": fmt.Sprintf("Subscriber for %s already exists", id),
+		})
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -213,7 +224,7 @@ func (c *connection) subscribe(id string, payload json.RawMessage) error {
 	return nil
 }
 
-func (c *connection) complete(id string) {
+func (c *connection) stop(id string) {
 	c.operationsMutex.Lock()
 	cancel := c.operations[id]
 	delete(c.operations, id)
@@ -264,7 +275,7 @@ func (c *connection) operationResponse(id string, resp *graphql.Response) {
 
 	err := c.writeMessage(&message{
 		Id:   id,
-		Type: nextType,
+		Type: dataType,
 	}, resp)
 	if err != nil {
 		c.close(err)
@@ -304,10 +315,19 @@ func (c *connection) operationError(id string, errs gqlerror.List) {
 
 	cancel()
 
+	var opErr interface{}
+	if len(errs) > 0 {
+		opErr = errs[0]
+	} else {
+		opErr = wsutil.ObjectPayload{
+			"message": "Error",
+		}
+	}
+
 	err := c.writeMessage(&message{
 		Id:   id,
 		Type: errorType,
-	}, errs)
+	}, opErr)
 	if err != nil {
 		c.close(err)
 	}
@@ -321,7 +341,7 @@ func (c *connection) initTimeout(ctx context.Context) {
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) && !c.initReceived {
 		c.close(wserr.CloseError{
-			Code:   code.ConnectionInitialisationTimeout,
+			Code:   int(websocket.StatusPolicyViolation),
 			Reason: "Connection initialisation timeout",
 		})
 	}
@@ -335,7 +355,7 @@ func (c *connection) authTimeout(ctx context.Context) {
 		var ce wserr.CloseError
 		if !errors.As(err, &ce) {
 			ce = wserr.CloseError{
-				Code:   code.Unauthorized,
+				Code:   int(websocket.StatusPolicyViolation),
 				Reason: "Authorization timed out",
 			}
 		}
@@ -345,14 +365,14 @@ func (c *connection) authTimeout(ctx context.Context) {
 	}
 }
 
-func (c *connection) ping(t *time.Ticker) {
+func (c *connection) keepAlive(t *time.Ticker) {
 	for {
 		select {
 		case <-c.req.Context().Done():
 			return
 		case <-t.C:
 			err := c.writeMessage(&message{
-				Type: pingType,
+				Type: keepAliveType,
 			}, nil)
 			if err != nil {
 				c.close(err)
@@ -369,7 +389,7 @@ func (c *connection) close(err error) {
 
 	var ce wserr.CloseError
 	if !errors.As(err, &ce) {
-		c.conn.Close(code.InternalServerError, "Error")
+		c.conn.Close(websocket.StatusInternalError, "Error")
 		return
 	}
 
@@ -384,11 +404,11 @@ func (c *connection) readMessage() (*message, error) {
 
 	msg, err := decodeMessage(data)
 	if err != nil {
-		return nil, wserr.CloseError{
-			Err:    err,
-			Code:   code.BadRequest,
-			Reason: "Invalid message",
-		}
+		return nil, c.writeMessage(&message{
+			Type: connectionErrorType,
+		}, wsutil.ObjectPayload{
+			"message": "Invalid message",
+		})
 	}
 
 	return msg, nil

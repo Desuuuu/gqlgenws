@@ -83,7 +83,7 @@ func (n *Negotiator) Do(w http.ResponseWriter, r *http.Request, exec graphql.Gra
 	}
 
 	if protocol == nil {
-		c.Close(websocket.StatusPolicyViolation, "subprotocol negotiation failed")
+		c.Close(websocket.StatusProtocolError, "subprotocol negotiation failed")
 		return
 	}
 

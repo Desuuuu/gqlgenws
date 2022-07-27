@@ -1,4 +1,4 @@
-package graphqlws
+package transportws
 
 import (
 	"context"
@@ -15,7 +15,6 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/testserver"
 	"github.com/Desuuuu/gqlgenws/wserr"
-	"github.com/Desuuuu/gqlgenws/wsprotocol/graphqlws/code"
 	"github.com/Desuuuu/gqlgenws/wsutil"
 	"github.com/stretchr/testify/require"
 	"github.com/vektah/gqlparser/v2"
@@ -115,11 +114,27 @@ func TestProtocol(t *testing.T) {
 		err = c.Write(ctx, websocket.MessageText, []byte("foo"))
 		require.NoError(t, err)
 
+		_, res, err := c.Read(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"type":"connection_error","payload":{"message":"Invalid message"}}`, string(res))
+	})
+
+	t.Run("terminate", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
+		defer cancel()
+
+		c, err := wsConnect(ctx, srv.URL, "")
+		require.NoError(t, err)
+		defer c.Close(websocket.StatusNormalClosure, "")
+
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"connection_terminate"}`))
+		require.NoError(t, err)
+
 		_, _, err = c.Read(ctx)
 
 		var ce websocket.CloseError
 		require.ErrorAs(t, err, &ce)
-		require.Equal(t, code.BadRequest, int(ce.Code))
+		require.Equal(t, websocket.StatusNormalClosure, ce.Code)
 	})
 
 	t.Run("init", func(t *testing.T) {
@@ -160,42 +175,10 @@ func TestProtocol(t *testing.T) {
 
 		var ce websocket.CloseError
 		require.ErrorAs(t, err, &ce)
-		require.Equal(t, code.TooManyInitialisationRequests, int(ce.Code))
+		require.Equal(t, websocket.StatusPolicyViolation, ce.Code)
 	})
 
-	t.Run("ping", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-		defer cancel()
-
-		c, err := wsConnect(ctx, srv.URL, "")
-		require.NoError(t, err)
-		defer c.Close(websocket.StatusNormalClosure, "")
-
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`))
-		require.NoError(t, err)
-
-		_, res, err := c.Read(ctx)
-		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"pong"}`, string(res))
-	})
-
-	t.Run("ping with payload", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-		defer cancel()
-
-		c, err := wsConnect(ctx, srv.URL, "")
-		require.NoError(t, err)
-		defer c.Close(websocket.StatusNormalClosure, "")
-
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping","payload":{"foo":"bar"}}`))
-		require.NoError(t, err)
-
-		_, res, err := c.Read(ctx)
-		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"pong","payload":{"foo":"bar"}}`, string(res))
-	})
-
-	t.Run("subscribe", func(t *testing.T) {
+	t.Run("start", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 		defer cancel()
 
@@ -210,17 +193,17 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"subscription { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"subscription { name }"}}`))
 		require.NoError(t, err)
 
 		h.SendNextSubscriptionMessage()
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"next","id":"foo","payload":{"data":{"name":"test"}}}`, string(res))
+		require.JSONEq(t, `{"type":"data","id":"foo","payload":{"data":{"name":"test"}}}`, string(res))
 	})
 
-	t.Run("subscribe single result", func(t *testing.T) {
+	t.Run("start single result", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 		defer cancel()
 
@@ -235,19 +218,19 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"query { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"query { name }"}}`))
 		require.NoError(t, err)
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"next","id":"foo","payload":{"data":{"name":"test"}}}`, string(res))
+		require.JSONEq(t, `{"type":"data","id":"foo","payload":{"data":{"name":"test"}}}`, string(res))
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"complete","id":"foo"}`, string(res))
 	})
 
-	t.Run("subscribe without init", func(t *testing.T) {
+	t.Run("start without init", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 		defer cancel()
 
@@ -255,17 +238,15 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		defer c.Close(websocket.StatusNormalClosure, "")
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"query { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"query { name }"}}`))
 		require.NoError(t, err)
 
-		_, _, err = c.Read(ctx)
-
-		var ce websocket.CloseError
-		require.ErrorAs(t, err, &ce)
-		require.Equal(t, code.Unauthorized, int(ce.Code))
+		_, res, err := c.Read(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"type":"connection_error","payload":{"message":"Unauthorized"}}`, string(res))
 	})
 
-	t.Run("subscribe id re-use", func(t *testing.T) {
+	t.Run("start id re-use", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 		defer cancel()
 
@@ -280,20 +261,18 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"subscription { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"subscription { name }"}}`))
 		require.NoError(t, err)
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"subscription { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"subscription { name }"}}`))
 		require.NoError(t, err)
 
-		_, _, err = c.Read(ctx)
-
-		var ce websocket.CloseError
-		require.ErrorAs(t, err, &ce)
-		require.Equal(t, code.SubscriberAlreadyExists, int(ce.Code))
+		_, res, err = c.Read(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"type":"connection_error","payload":{"message":"Subscriber for foo already exists"}}`, string(res))
 	})
 
-	t.Run("subscribe error", func(t *testing.T) {
+	t.Run("start error", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 		defer cancel()
 
@@ -335,7 +314,7 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"subscription { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"subscription { name }"}}`))
 		require.NoError(t, err)
 
 		_, _, err = c.Read(ctx)
@@ -361,16 +340,16 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"subscription { name }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"subscription { name }"}}`))
 		require.NoError(t, err)
 
 		h.SendNextSubscriptionMessage()
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"next","id":"foo","payload":{"data":{"name":"test"}}}`, string(res))
+		require.JSONEq(t, `{"type":"data","id":"foo","payload":{"data":{"name":"test"}}}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"complete","id":"foo"}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"stop","id":"foo"}`))
 		require.NoError(t, err)
 
 		time.Sleep(100 * time.Millisecond)
@@ -398,12 +377,12 @@ func TestProtocol(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"!"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"!"}}`))
 		require.NoError(t, err)
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"error","id":"foo","payload":[{"message":"Unexpected !","locations":[{"line":1,"column":1}],"extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, string(res))
+		require.JSONEq(t, `{"type":"error","id":"foo","payload":{"message":"Unexpected !","locations":[{"line":1,"column":1}],"extensions":{"code":"GRAPHQL_PARSE_FAILED"}}}`, string(res))
 	})
 }
 
@@ -481,7 +460,7 @@ func TestProtocol_InitFunc(t *testing.T) {
 
 		var ce websocket.CloseError
 		require.ErrorAs(t, err, &ce)
-		require.Equal(t, code.Forbidden, int(ce.Code))
+		require.Equal(t, websocket.StatusPolicyViolation, ce.Code)
 	})
 
 	t.Run("reject connection with a CloseError in InitFunc", func(t *testing.T) {
@@ -563,12 +542,12 @@ func TestProtocol_InitFunc(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
-		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"subscribe","id":"foo","payload":{"query":"query { getValue }"}}`))
+		err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"start","id":"foo","payload":{"query":"query { getValue }"}}`))
 		require.NoError(t, err)
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"type":"next","id":"foo","payload":{"data":"`+ctxValue+`"}}`, string(res))
+		require.JSONEq(t, `{"type":"data","id":"foo","payload":{"data":"`+ctxValue+`"}}`, string(res))
 
 		_, res, err = c.Read(ctx)
 		require.NoError(t, err)
@@ -670,16 +649,16 @@ func TestProtocol_InitTimeout(t *testing.T) {
 
 	var ce websocket.CloseError
 	require.ErrorAs(t, err, &ce)
-	require.Equal(t, code.ConnectionInitialisationTimeout, int(ce.Code))
+	require.Equal(t, websocket.StatusPolicyViolation, ce.Code)
 }
 
-func TestProtocol_PingInterval(t *testing.T) {
+func TestProtocol_KeepAliveInterval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer cancel()
 
 	h := testserver.New()
 	h.AddTransport(&Protocol{
-		PingInterval: 20 * time.Millisecond,
+		KeepAliveInterval: 20 * time.Millisecond,
 	})
 
 	srv := httptest.NewServer(h)
@@ -689,13 +668,20 @@ func TestProtocol_PingInterval(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close(websocket.StatusNormalClosure, "")
 
+	err = c.Write(ctx, websocket.MessageText, []byte(`{"type":"connection_init"}`))
+	require.NoError(t, err)
+
 	_, res, err := c.Read(ctx)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"type":"ping"}`, string(res))
+	require.JSONEq(t, `{"type":"connection_ack"}`, string(res))
 
 	_, res, err = c.Read(ctx)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"type":"ping"}`, string(res))
+	require.JSONEq(t, `{"type":"ka"}`, string(res))
+
+	_, res, err = c.Read(ctx)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"ka"}`, string(res))
 }
 
 func wsConnect(ctx context.Context, targetUrl string, protocol string) (*websocket.Conn, error) {

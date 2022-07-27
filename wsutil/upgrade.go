@@ -1,4 +1,3 @@
-// Package wsutil implements some WebSocket utility functions.
 package wsutil
 
 import (

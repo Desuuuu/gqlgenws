@@ -1,4 +1,6 @@
-package graphqlws
+// Package wsutil declares common types and implements some WebSocket utility
+// functions.
+package wsutil
 
 import (
 	"strings"

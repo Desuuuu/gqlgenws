@@ -1,4 +1,4 @@
-package graphqlws
+package transportws
 
 import (
 	"bytes"
@@ -8,14 +8,16 @@ import (
 type messageType string
 
 const (
-	connectionInitType = messageType("connection_init")
-	connectionAckType  = messageType("connection_ack")
-	pingType           = messageType("ping")
-	pongType           = messageType("pong")
-	subscribeType      = messageType("subscribe")
-	nextType           = messageType("next")
-	errorType          = messageType("error")
-	completeType       = messageType("complete")
+	connectionInitType      = messageType("connection_init")
+	connectionAckType       = messageType("connection_ack")
+	connectionErrorType     = messageType("connection_error")
+	connectionTerminateType = messageType("connection_terminate")
+	startType               = messageType("start")
+	stopType                = messageType("stop")
+	completeType            = messageType("complete")
+	dataType                = messageType("data")
+	errorType               = messageType("error")
+	keepAliveType           = messageType("ka")
 )
 
 type message struct {
@@ -55,7 +57,7 @@ func encodePayload(payload interface{}) (json.RawMessage, error) {
 }
 
 func decodePayload(data []byte, dst interface{}, opts ...func(*json.Decoder)) error {
-	if len(data) < 1 {
+	if data == nil {
 		return nil
 	}
 

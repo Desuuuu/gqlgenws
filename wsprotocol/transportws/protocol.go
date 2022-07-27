@@ -1,5 +1,5 @@
-// Package graphqlws implements the graphql-ws protocol.
-package graphqlws
+// Package transportws implements the subscriptions-transport-ws protocol.
+package transportws
 
 import (
 	"context"
@@ -12,12 +12,12 @@ import (
 	"nhooyr.io/websocket"
 )
 
-const ProtocolName = "graphql-transport-ws"
+const ProtocolName = "graphql-ws"
 
 const defaultInitTimeout = 3 * time.Second
 
-// Protocol implements the graphql-ws protocol described here:
-// https://github.com/enisdenjo/graphql-ws.
+// Protocol implements the subscriptions-transport-ws protocol described here:
+// https://github.com/apollographql/subscriptions-transport-ws.
 //
 // Protocol can be used as a gqlgenws.Protocol or directly as a gqlgen transport.
 type Protocol struct {
@@ -41,9 +41,9 @@ type Protocol struct {
 	// Defaults to 3 seconds.
 	InitTimeout time.Duration
 
-	// If PingInterval is set, a "ping" message is sent if no message is
+	// If KeepAliveInterval is set, a "ka" message is sent if no message is
 	// received for the specified duration.
-	PingInterval time.Duration
+	KeepAliveInterval time.Duration
 
 	// AcceptOptions defines options used during the WebSocket handshake.
 	AcceptOptions websocket.AcceptOptions
