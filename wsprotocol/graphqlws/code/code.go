@@ -7,5 +7,5 @@ const (
 	ConnectionInitialisationTimeout = 4408
 	SubscriberAlreadyExists         = 4409
 	TooManyInitialisationRequests   = 4429
-	InternalServerError             = 4500
+	InternalServerError             = 4501
 )

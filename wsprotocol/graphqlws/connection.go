@@ -341,7 +341,7 @@ func (c *connection) authTimeout(ctx context.Context) {
 		var ce wserr.CloseError
 		if !errors.As(err, &ce) {
 			ce = wserr.CloseError{
-				Code:   code.Unauthorized,
+				Code:   code.Forbidden,
 				Reason: "Authorization timed out",
 			}
 		}
